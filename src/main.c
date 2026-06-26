@@ -18,6 +18,10 @@
 #include "config.h"
 #include "vtty.h"
 #include "at_engine.h"
+#ifdef WITH_DSP
+#include "modem_core.h"
+#include "audio.h"
+#endif
 
 static volatile sig_atomic_t g_running = 1;
 static void on_signal(int s) { (void)s; g_running = 0; }
@@ -78,7 +82,108 @@ static void handle_console(at_engine_t *eng, loop_backend_t *lb) {
     else if (buf[0])                  printf("[console] commands: ring connect bye status quit\n");
 }
 
+#ifdef WITH_DSP
+/* ---- milestone-2 DSP self-test -------------------------------------------
+ * Cross-connect a caller and an answerer modem through a G.711 round-trip,
+ * train them, then push a known string each way and verify it survives. No
+ * SIP, no RTP, no hardware - just the spandsp v22bis data path. */
+#define FRAME 160  /* 20 ms @ 8 kHz */
+
+static void st_event(void *ctx, int connected, int rate) {
+    int *flag = ctx;
+    *flag = connected;
+    printf("[selftest] %s (%d bps)\n", connected ? "CONNECTED" : "carrier down", rate);
+}
+
+/* Move one 20 ms frame from src to dst through codec enc/dec. */
+static void st_pump(modem_core_t *src, modem_core_t *dst, codec_t codec) {
+    int16_t pcm[FRAME];
+    uint8_t g711[FRAME];
+    int16_t back[FRAME];
+    modem_core_tx_samples(src, pcm, FRAME);
+    audio_encode(codec, pcm, g711, FRAME);
+    audio_decode(codec, g711, back, FRAME);
+    modem_core_rx_samples(dst, back, FRAME);
+}
+
+static int run_selftest(void) {
+    codec_t codec = CODEC_PCMA;
+    int a_conn = 0, b_conn = 0;
+    /* No answer tone here - we want a clean v22bis<->v22bis handshake. */
+    modem_core_t *ans  = modem_core_create(0 /*answer*/, 1200, 0, st_event, &a_conn);
+    modem_core_t *call = modem_core_create(1 /*caller*/, 1200, 0, st_event, &b_conn);
+    if (!ans || !call) { fprintf(stderr, "selftest: modem create failed\n"); return 1; }
+
+    printf("[selftest] training...\n");
+    int trained_at = -1;
+    for (int i = 0; i < 4000; i++) {       /* up to 80 s of audio */
+        st_pump(call, ans,  codec);        /* caller -> answerer */
+        st_pump(ans,  call, codec);        /* answerer -> caller */
+        if (a_conn && b_conn) { trained_at = i; break; }
+    }
+    if (!(a_conn && b_conn)) {
+        fprintf(stderr, "[selftest] FAIL: modems did not train\n");
+        return 1;
+    }
+    printf("[selftest] both trained after %d frames (%d ms of audio)\n",
+           trained_at, trained_at * 20);
+
+    /* Let the link settle, then send a known message caller -> answerer. */
+    const char *msg = "The quick brown fox 0123456789!\r\n";
+    modem_core_send(call, (const uint8_t *)msg, strlen(msg));
+
+    char got[256]; size_t n = 0;
+    for (int i = 0; i < 400 && n < strlen(msg) + 4; i++) {
+        st_pump(call, ans, codec);
+        st_pump(ans, call, codec);
+        n += modem_core_recv(ans, (uint8_t *)got + n, sizeof(got) - 1 - n);
+    }
+    got[n] = '\0';
+
+    /* The payload must arrive intact and contiguous. A real modem can emit a
+     * stray byte at the connect boundary, so we look for the message as a
+     * substring rather than demanding a pristine stream (the upper-layer
+     * packet protocol in mm_manager has framing/CRC for exactly this). */
+    int ok = (memmem(got, n, msg, strlen(msg)) != NULL);
+    size_t extra = n > strlen(msg) ? n - strlen(msg) : 0;
+    printf("[selftest] received %zu bytes (payload intact=%s, connect-artifact bytes=%zu)\n",
+           n, ok ? "yes" : "NO", extra);
+    if (!ok) printf("[selftest] got: %.*s\n", (int)n, got);
+
+    /* Idle quietness: with no DTE data, the line must not spew bytes at the
+     * peer (otherwise a real session would drown in garbage between packets). */
+    (void)modem_core_recv(ans,  (uint8_t *)got, sizeof(got)); /* flush */
+    (void)modem_core_recv(call, (uint8_t *)got, sizeof(got));
+    size_t idle_bytes = 0;
+    for (int i = 0; i < 500; i++) {           /* 10 s of idle audio */
+        st_pump(call, ans, codec);
+        st_pump(ans, call, codec);
+        size_t r = modem_core_recv(ans,  (uint8_t *)got, sizeof(got));
+        if (idle_bytes == 0 && r > 0) {
+            printf("[selftest] idle byte sample:");
+            for (size_t k = 0; k < r && k < 8; k++) printf(" %02x", (uint8_t)got[k]);
+            printf("\n");
+        }
+        idle_bytes += r;
+        idle_bytes += modem_core_recv(call, (uint8_t *)got, sizeof(got));
+    }
+    int idle_ok = (idle_bytes == 0);
+    printf("[selftest] idle quietness over 10s: %zu stray bytes (%s)\n",
+           idle_bytes, idle_ok ? "clean" : "NOISY");
+
+    modem_core_destroy(ans);
+    modem_core_destroy(call);
+    ok = ok && idle_ok;
+    printf("[selftest] %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
+#endif /* WITH_DSP */
+
 int main(int argc, char **argv) {
+#ifdef WITH_DSP
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--selftest")) return run_selftest();
+#endif
     softmodem_config_t cfg;
     config_defaults(&cfg);
     int rc = config_parse_args(&cfg, argc, argv);
