@@ -11,7 +11,12 @@ void config_defaults(softmodem_config_t *cfg) {
     snprintf(cfg->sip_bind,   sizeof(cfg->sip_bind),   "0.0.0.0:5060");
     snprintf(cfg->codecs,     sizeof(cfg->codecs),     "PCMA,PCMU");
     cfg->ptime_ms = 20;
-    cfg->echo_can = 1;
+    /* OFF by default and intentionally so: Bell 212A / V.22 is full-duplex by
+     * frequency-division (originate = low band, answer = high band), and each
+     * receiver's band filter rejects its own near-end echo. A voice echo
+     * canceller would corrupt the modem tones, so we don't cancel. The ATA and
+     * any PSTN/SIP path must likewise have EC/VAD/CNG disabled. */
+    cfg->echo_can = 0;
     snprintf(cfg->modem_mode, sizeof(cfg->modem_mode), "B212");
     snprintf(cfg->tty_device, sizeof(cfg->tty_device), "/dev/ttyMODEM0");
     cfg->log_level = 1;
@@ -73,7 +78,7 @@ static void usage(const char *prog) {
         "  -r, --registrar <host>  Registrar (registrar mode)\n"
         "  -u, --user <user>       SIP username\n"
         "  -w, --pass <pass>       SIP password\n"
-        "  -e, --echo-can <on|off> Echo canceller (default on)\n"
+        "  -e, --echo-can <on|off> Echo canceller (default OFF; keep off for modems)\n"
         "  -v, --verbose           Increase log level (repeatable)\n"
         "  -h, --help              This help\n",
         prog);

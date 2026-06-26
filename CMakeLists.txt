@@ -35,7 +35,8 @@ if(WITH_RTP)
     list(APPEND SOFTMODEM_SRC src/rtp.c)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(ORTP REQUIRED ortp)
-    list(APPEND SOFTMODEM_LIBS ${ORTP_LIBRARIES})
+    pkg_check_modules(BCTBX bctoolbox)          # oRTP 5.x logging depends on it
+    list(APPEND SOFTMODEM_LIBS ${ORTP_LIBRARIES} ${BCTBX_LIBRARIES})
     list(APPEND SOFTMODEM_DEFS WITH_RTP=1)
 endif()
 

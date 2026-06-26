@@ -22,6 +22,9 @@
 #include "modem_core.h"
 #include "audio.h"
 #endif
+#ifdef WITH_RTP
+#include "rtp.h"
+#endif
 
 static volatile sig_atomic_t g_running = 1;
 static void on_signal(int s) { (void)s; g_running = 0; }
@@ -179,10 +182,64 @@ static int run_selftest(void) {
 }
 #endif /* WITH_DSP */
 
+#ifdef WITH_RTP
+/* ---- milestone-3 RTP transport test --------------------------------------
+ * Two endpoints on localhost exchange paced 20 ms G.711 frames; verify the
+ * payloads arrive intact and in order. Exercises rtp.c without the modem. */
+static int run_rtptest(void) {
+    const int N = 50, LEN = 160;
+    rtp_global_init(1);
+    rtp_endpoint_t *a = rtp_open("127.0.0.1", 40100, 8 /*PCMA*/);
+    rtp_endpoint_t *b = rtp_open("127.0.0.1", 40102, 8);
+    if (!a || !b) { fprintf(stderr, "rtptest: open failed\n"); return 1; }
+    rtp_set_remote(a, "127.0.0.1", 40102);
+    rtp_set_remote(b, "127.0.0.1", 40100);
+
+    int received = 0, corrupt = 0, disordered = 0, prev = -1;
+    uint8_t frame[LEN], rx[LEN];
+    /* send_ts advances per transmitted frame; play_ts is an independent
+     * monotonic playout clock so the jitter buffer can release frames. Each
+     * frame k is filled with the constant byte k+1, so we can check both
+     * intra-frame integrity and inter-frame ordering without caring about the
+     * jitter buffer's absolute timestamp offset. */
+    uint32_t send_ts = 0, play_ts = 0;
+    for (int i = 0; i < N + 8; i++) {        /* a few extra ticks to drain */
+        if (i < N) {
+            memset(frame, (uint8_t)((i + 1) & 0xFF), LEN);
+            rtp_send(a, frame, LEN, send_ts);
+            send_ts += LEN;
+        }
+        nanosleep((const struct timespec[]){{0, 20 * 1000000L}}, NULL);
+
+        int n = rtp_recv(b, rx, LEN, play_ts);
+        if (n > 0) {
+            uint8_t val = rx[0];
+            for (int k = 1; k < n; k++) if (rx[k] != val) { corrupt++; break; }
+            if (prev >= 0 && val != (uint8_t)((prev + 1) & 0xFF)) disordered++;
+            prev = val;
+            received++;
+        }
+        play_ts += LEN;
+    }
+
+    printf("[rtptest] sent %d frames, received %d, corrupt %d, out-of-order %d\n",
+           N, received, corrupt, disordered);
+    int mismatched = corrupt + disordered;
+    rtp_close(a); rtp_close(b); rtp_global_exit();
+    int ok = (received >= N - 2) && (mismatched == 0);  /* allow tail slack */
+    printf("[rtptest] %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
+#endif /* WITH_RTP */
+
 int main(int argc, char **argv) {
 #ifdef WITH_DSP
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--selftest")) return run_selftest();
+#endif
+#ifdef WITH_RTP
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--rtptest")) return run_rtptest();
 #endif
     softmodem_config_t cfg;
     config_defaults(&cfg);
