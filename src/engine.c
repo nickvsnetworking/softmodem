@@ -14,6 +14,7 @@
 #include <sofia-sip/nua.h>
 #include <sofia-sip/sip_status.h>
 #include <sofia-sip/su_log.h>
+#include <sofia-sip/msg_header.h>
 
 #define FRAME           160     /* 20 ms @ 8 kHz                                */
 /* Answer tone before the data carrier (answer side). 0 = straight to the
@@ -27,9 +28,10 @@ struct engine {
     const softmodem_config_t *cfg;
 
     /* sofia */
-    su_root_t   *root;
-    nua_t       *nua;
-    su_timer_t  *timer;
+    su_root_t      *root;
+    nua_t          *nua;
+    nua_handle_t   *reg_nh;     /* registration handle (registrar mode) */
+    su_timer_t     *timer;
     pthread_t    su_thread;
     int          su_running;
     volatile int stop;
@@ -234,6 +236,22 @@ static void handle_hangup(engine_t *e) {
     teardown_media(e);
 }
 
+/* ---- digest auth (registrar / proxy challenges) -------------------------- */
+
+static void authenticate(engine_t *e, nua_handle_t *nh, sip_t const *sip) {
+    if (!sip) return;
+    msg_auth_t const *au = sip->sip_www_authenticate
+                         ? sip->sip_www_authenticate : sip->sip_proxy_authenticate;
+    if (!au || !au->au_params) return;
+    /* realm comes back already quoted, e.g. realm="asterisk" */
+    msg_param_t realm = msg_params_find(au->au_params, "realm=");
+    char auth[256];
+    snprintf(auth, sizeof(auth), "%s:%s:%s:%s",
+             au->au_scheme ? au->au_scheme : "Digest",
+             realm ? realm : "\"\"", e->cfg->sip_user, e->cfg->sip_pass);
+    nua_authenticate(nh, NUTAG_AUTH(auth), TAG_END());
+}
+
 /* ---- sofia callback (su thread) ------------------------------------------ */
 
 static void nua_cb(nua_event_t event, int status, char const *phrase,
@@ -259,6 +277,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         break;
 
     case nua_r_invite:           /* response to our outbound INVITE */
+        if (status == 401 || status == 407) { authenticate(e, nh, sip); break; }
         if (status >= 200 && status < 300) {
             if (sip && sip->sip_payload &&
                 parse_sdp(e, sip->sip_payload->pl_data, sip->sip_payload->pl_len) == 0) {
@@ -281,6 +300,12 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         teardown_media(e);
         e->nh = NULL;
         push_event(e, EV_NO_CARRIER);
+        break;
+
+    case nua_r_register:
+        if (status == 401 || status == 407) authenticate(e, nh, sip);
+        else if (status == 200) printf("engine: registered as %s\n", e->cfg->sip_user);
+        else if (status >= 300) fprintf(stderr, "engine: REGISTER failed (%d)\n", status);
         break;
 
     case nua_r_shutdown:
@@ -373,6 +398,17 @@ static void *su_thread_fn(void *arg) {
     su_timer_set_for_ever(e->timer, timer_cb, e);
     e->su_running = 1;
     printf("engine: SIP UA listening on %s\n", url);
+
+    /* Registrar mode: REGISTER our AOR so the PBX can route calls to us. */
+    if (e->cfg->sip_mode == SIP_MODE_REGISTRAR && e->cfg->sip_registrar[0]) {
+        char aor[256], reg[160];
+        snprintf(aor, sizeof(aor), "sip:%s@%s", e->cfg->sip_user, e->cfg->sip_registrar);
+        snprintf(reg, sizeof(reg), "sip:%s", e->cfg->sip_registrar);
+        e->reg_nh = nua_handle(e->nua, NULL,
+                               SIPTAG_TO_STR(aor), SIPTAG_FROM_STR(aor), TAG_END());
+        nua_register(e->reg_nh, NUTAG_REGISTRAR(reg), TAG_END());
+        printf("engine: registering %s at %s\n", aor, reg);
+    }
 
     /* Single run loop. The timer initiates nua_shutdown() on stop and breaks
      * the loop once nua_r_shutdown arrives (or after a ~2s timeout). */
