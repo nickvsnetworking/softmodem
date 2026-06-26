@@ -21,7 +21,9 @@ typedef struct {
     /* --- media --- */
     char        codecs[64];        /* "PCMA,PCMU"                    */
     int         ptime_ms;          /* 20                             */
-    int         echo_can;          /* bool                          */
+    int         echo_can;          /* bool (kept OFF for modems)     */
+    char        media_ip[64];      /* local RTP IP advertised in SDP */
+    int         media_port;        /* local RTP base port            */
 
     /* --- modem --- */
     char        modem_mode[16];    /* "B212"                         */

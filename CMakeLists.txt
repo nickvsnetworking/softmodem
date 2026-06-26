@@ -8,7 +8,13 @@ add_compile_options(-Wall -Wextra -Wno-unused-parameter -g -O2)
 # Feature toggles - each milestone flips one on as its deps land.
 option(WITH_DSP "Build spandsp modem core (milestone 2+)" OFF)
 option(WITH_RTP "Build oRTP media transport (milestone 3+)" OFF)
-option(WITH_SIP "Build sofia-sip signalling (milestone 4+)" OFF)
+option(WITH_SIP "Build sofia-sip signalling + engine (milestone 4+)" OFF)
+
+# The SIP engine needs the modem core and RTP transport.
+if(WITH_SIP)
+    set(WITH_DSP ON)
+    set(WITH_RTP ON)
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -41,7 +47,7 @@ if(WITH_RTP)
 endif()
 
 if(WITH_SIP)
-    list(APPEND SOFTMODEM_SRC src/sip.c)
+    list(APPEND SOFTMODEM_SRC src/engine.c)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SOFIA REQUIRED sofia-sip-ua)
     list(APPEND SOFTMODEM_LIBS ${SOFIA_LIBRARIES})

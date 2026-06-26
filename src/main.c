@@ -25,6 +25,9 @@
 #ifdef WITH_RTP
 #include "rtp.h"
 #endif
+#ifdef WITH_SIP
+#include "engine.h"
+#endif
 
 static volatile sig_atomic_t g_running = 1;
 static void on_signal(int s) { (void)s; g_running = 0; }
@@ -35,6 +38,7 @@ static long now_ms(void) {
     return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+#ifndef WITH_SIP
 /* ---- milestone-1 loopback backend ----------------------------------------
  * Stands in for the real SIP+DSP path: "answering" or "dialling" simply leads
  * to a CONNECT a moment later, and online data is echoed back to the DTE. This
@@ -84,6 +88,7 @@ static void handle_console(at_engine_t *eng, loop_backend_t *lb) {
     else if (!strcmp(buf, "quit"))    g_running = 0;
     else if (buf[0])                  printf("[console] commands: ring connect bye status quit\n");
 }
+#endif /* !WITH_SIP */
 
 #ifdef WITH_DSP
 /* ---- milestone-2 DSP self-test -------------------------------------------
@@ -258,20 +263,41 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    at_engine_t eng;
+
+#ifdef WITH_SIP
+    /* Full build: real SIP + RTP + spandsp modem behind the AT engine. */
+    engine_t *engine = engine_create(&cfg);
+    if (!engine || engine_start(engine) != 0) {
+        fprintf(stderr, "failed to start SIP engine\n");
+        vtty_close(&vtty);
+        return 1;
+    }
+    at_backend_t be = engine_backend(engine);
+    at_engine_init(&eng, &vtty, &be);
+
+    struct pollfd fds[3];
+    fds[0].fd = vtty.master_fd;          fds[0].events = POLLIN;
+    fds[1].fd = STDIN_FILENO;            fds[1].events = POLLIN;
+    fds[2].fd = engine_event_fd(engine); fds[2].events = POLLIN;
+    int nfds = 3;
+    printf("softmodem ready (SIP). Type 'quit' to exit.\n");
+#else
+    /* Reduced build: in-process loopback backend, console-driven. */
     loop_backend_t lb = { 0 };
     at_backend_t be = { .ctx = &lb, .answer = lb_answer, .dial = lb_dial, .hangup = lb_hangup };
-    at_engine_t eng;
     at_engine_init(&eng, &vtty, &be);
     lb.eng = &eng;
-
-    printf("softmodem ready. Console: ring | connect | bye | status | quit\n");
 
     struct pollfd fds[2];
     fds[0].fd = vtty.master_fd; fds[0].events = POLLIN;
     fds[1].fd = STDIN_FILENO;   fds[1].events = POLLIN;
+    int nfds = 2;
+    printf("softmodem ready. Console: ring | connect | bye | status | quit\n");
+#endif
 
     while (g_running) {
-        int pr = poll(fds, 2, 50);
+        int pr = poll(fds, nfds, 20);
         long t = now_ms();
 
         if (pr > 0 && (fds[0].revents & POLLIN)) {
@@ -280,25 +306,51 @@ int main(int argc, char **argv) {
             for (long i = 0; i < n; i++) {
                 int forward = at_engine_dte_byte(&eng, buf[i], t);
                 if (forward && at_engine_is_online(&eng)) {
-                    /* loopback: echo data back to the DTE */
-                    vtty_write(&vtty, &buf[i], 1);
+#ifdef WITH_SIP
+                    engine_modem_send(engine, &buf[i], 1);
+#else
+                    vtty_write(&vtty, &buf[i], 1);  /* loopback echo */
+#endif
                 }
             }
         }
         if (pr > 0 && (fds[1].revents & POLLIN)) {
+#ifdef WITH_SIP
+            char cbuf[32];
+            long cn = read(STDIN_FILENO, cbuf, sizeof(cbuf) - 1);
+            if (cn > 0) { cbuf[cn] = '\0'; if (strncmp(cbuf, "quit", 4) == 0) g_running = 0; }
+#else
             handle_console(&eng, &lb);
+#endif
         }
+
+#ifdef WITH_SIP
+        if (pr > 0 && (fds[2].revents & POLLIN))
+            engine_dispatch_events(engine, &eng);
+
+        /* drain demodulated bytes from the line to the DTE */
+        if (at_engine_is_online(&eng)) {
+            uint8_t rb[256];
+            size_t rn;
+            while ((rn = engine_modem_recv(engine, rb, sizeof(rb))) > 0)
+                vtty_write(&vtty, rb, rn);
+        }
+#endif
 
         at_engine_tick(&eng, t);
 
-        /* fire the loopback "connect" once its timer expires */
+#ifndef WITH_SIP
         if (lb.connect_pending && t >= lb.connect_at_ms) {
             lb.connect_pending = 0;
             at_engine_on_connect(&eng, 1200);
         }
+#endif
     }
 
     printf("\nshutting down\n");
+#ifdef WITH_SIP
+    engine_destroy(engine);
+#endif
     vtty_close(&vtty);
     return 0;
 }

@@ -17,6 +17,8 @@ void config_defaults(softmodem_config_t *cfg) {
      * canceller would corrupt the modem tones, so we don't cancel. The ATA and
      * any PSTN/SIP path must likewise have EC/VAD/CNG disabled. */
     cfg->echo_can = 0;
+    snprintf(cfg->media_ip, sizeof(cfg->media_ip), "127.0.0.1");
+    cfg->media_port = 40000;
     snprintf(cfg->modem_mode, sizeof(cfg->modem_mode), "B212");
     snprintf(cfg->tty_device, sizeof(cfg->tty_device), "/dev/ttyMODEM0");
     cfg->log_level = 1;
@@ -43,6 +45,8 @@ static void set_kv(softmodem_config_t *cfg, const char *key, const char *val) {
     else if (!strcmp(key, "codecs"))    snprintf(cfg->codecs,        sizeof(cfg->codecs),        "%s", val);
     else if (!strcmp(key, "ptime"))     cfg->ptime_ms = atoi(val);
     else if (!strcmp(key, "echo_can"))  cfg->echo_can = (!strcmp(val, "on") || !strcmp(val, "1"));
+    else if (!strcmp(key, "media_ip"))  snprintf(cfg->media_ip, sizeof(cfg->media_ip), "%s", val);
+    else if (!strcmp(key, "media_port")) cfg->media_port = atoi(val);
     else if (!strcmp(key, "modem"))     snprintf(cfg->modem_mode,    sizeof(cfg->modem_mode),    "%s", val);
     else if (!strcmp(key, "device"))    snprintf(cfg->tty_device,    sizeof(cfg->tty_device),    "%s", val);
     else fprintf(stderr, "config: ignoring unknown key '%s'\n", key);
@@ -79,6 +83,8 @@ static void usage(const char *prog) {
         "  -u, --user <user>       SIP username\n"
         "  -w, --pass <pass>       SIP password\n"
         "  -e, --echo-can <on|off> Echo canceller (default OFF; keep off for modems)\n"
+        "  -I, --media-ip <ip>     Local RTP IP advertised in SDP (default 127.0.0.1)\n"
+        "  -P, --media-port <port> Local RTP base port (default 40000)\n"
         "  -v, --verbose           Increase log level (repeatable)\n"
         "  -h, --help              This help\n",
         prog);
@@ -95,18 +101,21 @@ int config_parse_args(softmodem_config_t *cfg, int argc, char **argv) {
         {"user",      required_argument, 0, 'u'},
         {"pass",      required_argument, 0, 'w'},
         {"echo-can",  required_argument, 0, 'e'},
+        {"media-ip",  required_argument, 0, 'I'},
+        {"media-port",required_argument, 0, 'P'},
         {"verbose",   no_argument,       0, 'v'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
+    static const char *shortopts = "c:d:m:b:p:r:u:w:e:I:P:vh";
     int c;
     /* First pass: honour --config so CLI flags can override file values. */
     optind = 1;
-    while ((c = getopt_long(argc, argv, "c:d:m:b:p:r:u:w:e:vh", opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, shortopts, opts, NULL)) != -1) {
         if (c == 'c') config_load_file(cfg, optarg);
     }
     optind = 1;
-    while ((c = getopt_long(argc, argv, "c:d:m:b:p:r:u:w:e:vh", opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, shortopts, opts, NULL)) != -1) {
         switch (c) {
         case 'c': break; /* already handled */
         case 'd': set_kv(cfg, "device", optarg); break;
@@ -117,6 +126,8 @@ int config_parse_args(softmodem_config_t *cfg, int argc, char **argv) {
         case 'u': set_kv(cfg, "user", optarg); break;
         case 'w': set_kv(cfg, "pass", optarg); break;
         case 'e': set_kv(cfg, "echo_can", optarg); break;
+        case 'I': set_kv(cfg, "media_ip", optarg); break;
+        case 'P': set_kv(cfg, "media_port", optarg); break;
         case 'v': cfg->log_level++; break;
         case 'h': usage(argv[0]); return 1;
         default:  usage(argv[0]); return -1;
@@ -134,6 +145,7 @@ void config_dump(const softmodem_config_t *cfg) {
     printf("  sip.user      = %s\n", cfg->sip_user[0] ? cfg->sip_user : "(unset)");
     printf("  media.codecs  = %s  ptime=%dms  echo_can=%s\n",
            cfg->codecs, cfg->ptime_ms, cfg->echo_can ? "on" : "off");
+    printf("  media.local   = %s:%d\n", cfg->media_ip, cfg->media_port);
     printf("  modem.mode    = %s\n", cfg->modem_mode);
     printf("  tty.device    = %s\n", cfg->tty_device);
 }
